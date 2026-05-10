@@ -49,6 +49,7 @@ def make_user_prompt(count, text, source_label):
 
 # ======================== API ট্র্যাকিং ========================
 api_tracker = {}
+
 def update_tracker(name, ok, count=0, err=""):
     if name not in api_tracker:
         api_tracker[name] = {"status": "unknown", "last_error": "", "total": 0}
@@ -61,35 +62,63 @@ def update_tracker(name, ok, count=0, err=""):
         t["status"] = "failed"
         t["last_error"] = err[:200] if err else "Unknown"
 
-# ---------- Groq ----------
+# ======================== GROQ (4 MODEL + FALLBACK) ========================
+# অর্ডার: বেস্ট → ফাস্ট → রিজনিং → লাইট
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",          # 70B, 128K ctx → বেস্ট কোয়ালিটি
+    "openai/gpt-oss-120b",               # 120B, 128K ctx → OpenAI reasoning
+    "deepseek-r1-distill-llama-70b",     # 70B, 128K ctx → DeepSeek reasoning
+    "llama-3.1-8b-instant",              # 8B, 128K ctx → ফাস্ট ফলব্যাক
+]
+
 def ask_groq(text, count=25, label="Groq"):
     key = os.getenv("GROQ_API_KEY")
     if not key:
+        print("⚠️ Groq key missing")
         return ""
+
     client = Groq(api_key=key)
-    models = ["openai/gpt-oss-120b", "llama-3.1-8b-instant"]
     user_prompt = make_user_prompt(count, text, label)
-    for model in models:
-        for _ in range(2):
+
+    for model in GROQ_MODELS:
+        for attempt in range(2):  # প্রতি মডেল ২ বার try
             try:
                 chat = client.chat.completions.create(
                     model=model,
-                    messages=[{"role":"system","content":SYSTEM_MESSAGE},{"role":"user","content":user_prompt}],
-                    temperature=0.9, max_tokens=8192
+                    messages=[
+                        {"role": "system", "content": SYSTEM_MESSAGE},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.9,
+                    max_tokens=8192
                 )
-                print(f"✅ {label} ({model}) success")
-                return chat.choices[0].message.content
+                raw = chat.choices[0].message.content
+                print(f"✅ Groq ({model}) success, {len(raw)} chars")
+                return raw
             except Exception as e:
                 err = str(e)
-                if "413" not in err:
-                    update_tracker(label, False, err=err)
-                time.sleep(3)
+                # HTTP 413 = prompt too large → skip
+                if "413" in err:
+                    print(f"⚠️ Groq ({model}): 413 payload too large, skip")
+                    update_tracker(label, False, err=f"{model}: 413")
+                    break  # এই মডেল skip, পরেরটায় যাও
+                # Rate limit → অপেক্ষা করে retry
+                if "429" in err or "rate" in err.lower():
+                    print(f"⏳ Groq ({model}): rate limited, waiting 10s...")
+                    time.sleep(10)
+                    continue
+                print(f"❌ Groq ({model}) error: {err[:100]}")
+                update_tracker(label, False, err=f"{model}: {err[:80]}")
+                time.sleep(2)
+                break  # অন্য error → পরের মডেল
     return ""
 
-# ---------- Cerebras ----------
+
+# ======================== CEREBRAS ========================
 def ask_cerebras(text, count=25, label="Cerebras"):
     key = os.getenv("CEREBRAS_API_KEY")
     if not key:
+        print("⚠️ Cerebras key missing")
         return ""
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     user_prompt = make_user_prompt(count, text, label)
@@ -111,10 +140,12 @@ def ask_cerebras(text, count=25, label="Cerebras"):
         update_tracker(label, False, err=str(e))
     return ""
 
-# ---------- Mistral ----------
+
+# ======================== MISTRAL ========================
 def ask_mistral(text, count=25, label="Mistral"):
     key = os.getenv("MISTRAL_API_KEY")
     if not key:
+        print("⚠️ Mistral key missing")
         return ""
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     user_prompt = make_user_prompt(count, text, label)
@@ -136,31 +167,14 @@ def ask_mistral(text, count=25, label="Mistral"):
         update_tracker(label, False, err=str(e))
     return ""
 
-# ---------- OpenRouter (Free model) ----------
-def ask_openrouter(model_id, text, count, label):
-    key = os.getenv("OPENROUTER_API_KEY")
-    if not key:
-        return ""
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    user_prompt = make_user_prompt(count, text, label)
-    data = {
-        "model": model_id,
-        "messages": [{"role":"system","content":SYSTEM_MESSAGE},{"role":"user","content":user_prompt}],
-        "temperature": 0.9, "max_tokens": 8192
-    }
-    try:
-        r = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=90)
-        if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"]
-        else:
-            print(f"❌ {label} HTTP {r.status_code}")
-            update_tracker(label, False, err=f"HTTP {r.status_code}")
-    except Exception as e:
-        print(f"❌ {label} exception: {e}")
-        update_tracker(label, False, err=str(e))
-    return ""
 
-# ---------- Cohere ----------
+# ======================== COHERE (MODEL FIX) ========================
+COHERE_MODELS = [
+    "command-r-08-2024",    # command-r → Cohere-র flagship chat model
+    "command-r-plus",        # আরও বড় ভার্সন
+    "command",               # লেটেস্ট কমান্ড
+]
+
 def ask_cohere(text, count=25, label="Cohere"):
     key = os.getenv("COHERE_API_KEY")
     if not key:
@@ -169,20 +183,76 @@ def ask_cohere(text, count=25, label="Cohere"):
     co = cohere.Client(key)
     user_prompt = make_user_prompt(count, text, label)
     full_prompt = SYSTEM_MESSAGE + "\n\n" + user_prompt
-    try:
-        response = co.chat(message=full_prompt, model="command-a")
-        print(f"✅ {label} success")
-        return response.text
-    except Exception as e:
-        print(f"❌ {label} error: {e}")
-        return ""
 
-# ---------- পার্সার (Groq সহ সব ফরম্যাট) ----------
+    for model in COHERE_MODELS:
+        try:
+            response = co.chat(message=full_prompt, model=model)
+            print(f"✅ Cohere ({model}) success")
+            return response.text
+        except Exception as e:
+            err = str(e)
+            if "not found" in err.lower() or "404" in err:
+                print(f"⚠️ Cohere ({model}) not found, trying next...")
+                continue
+            print(f"❌ Cohere ({model}) error: {err[:100]}")
+            update_tracker(label, False, err=err[:80])
+            break  # অন্য error হলে loop থেকে বের হও
+    return ""
+
+
+# ======================== OPENROUTER (FREE MODEL FIX) ========================
+# openrouter/free → auto-routing ফ্রি মডেলে
+OR_MODELS = [
+    "openrouter/free",                       # অটো-বেস্ট ফ্রি
+    "google/gemini-2.5-flash-exp:free",      # Gemini Flash free
+    "meta-llama/llama-4-maverick:free",      # Llama 4 17B MoE free
+    "deepseek/deepseek-r1:free",             # DeepSeek R1 (free tag)
+]
+
+def ask_openrouter(model_id, text, count, label):
+    key = os.getenv("OPENROUTER_API_KEY")
+    if not key:
+        print("⚠️ OpenRouter key missing")
+        return ""
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    user_prompt = make_user_prompt(count, text, label)
+
+    for model in OR_MODELS:
+        data = {
+            "model": model,
+            "messages": [{"role":"system","content":SYSTEM_MESSAGE},{"role":"user","content":user_prompt}],
+            "temperature": 0.9, "max_tokens": 8192
+        }
+        try:
+            r = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                            headers=headers, json=data, timeout=90)
+            if r.status_code == 200:
+                print(f"✅ OpenRouter ({model}) success")
+                return r.json()["choices"][0]["message"]["content"]
+            elif r.status_code == 402:
+                print(f"⚠️ OpenRouter ({model}) 402 Payment Required")
+                update_tracker(label, False, err=f"{model}: 402")
+                continue
+            elif r.status_code == 400:
+                print(f"⚠️ OpenRouter ({model}) 400 Bad Request")
+                update_tracker(label, False, err=f"{model}: 400")
+                continue
+            else:
+                print(f"❌ OpenRouter ({model}) HTTP {r.status_code}")
+                update_tracker(label, False, err=f"{model}: {r.status_code}")
+                continue
+        except Exception as e:
+            print(f"❌ OpenRouter ({model}) exception: {e}")
+            update_tracker(label, False, err=str(e)[:80])
+            continue
+    return ""
+
+
+# ======================== পার্সার ========================
 def parse_qa_text(raw, source="unknown"):
     if not raw:
         return []
 
-    # 1. Standard format
     matches = re.findall(
         r'\d*\.?\s*(?:Question|Q):\s*(.*?)\n\s*(?:Answer|A):\s*(.*?)(?=\n\s*\d*\.?\s*(?:Question|Q):|$)',
         raw, re.DOTALL | re.IGNORECASE
@@ -190,7 +260,6 @@ def parse_qa_text(raw, source="unknown"):
     if matches:
         return [{"question":q.strip(), "answer":a.strip(), "source":source} for q, a in matches]
 
-    # 2. Markdown style
     matches = re.findall(
         r'[*_]*\s*(?:Question|Q)\s*[*_]*\s*:\s*(.*?)\n\s*[*_]*\s*(?:Answer|A)\s*[*_]*\s*:\s*(.*?)(?=\n\s*[*_]*\s*(?:Question|Q)|$)',
         raw, re.DOTALL | re.IGNORECASE
@@ -198,7 +267,6 @@ def parse_qa_text(raw, source="unknown"):
     if matches:
         return [{"question":q.strip(), "answer":a.strip(), "source":source} for q, a in matches]
 
-    # 3. Groq-style: detects Q/A separated by newline with ":" prefix
     lines = raw.split("\n")
     qa = []
     i = 0
@@ -216,20 +284,18 @@ def parse_qa_text(raw, source="unknown"):
     if qa:
         return qa
 
-    # 4. Fallback: use first 500 chars as raw answer
     return [{"question": f"Output from {source}", "answer": raw[:500], "source": source}]
+
 
 def get_output_file():
     return f"dataset_cyber_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
-# ---------- মেইন ----------
+
+# ======================== মেইন ========================
 def main():
     print(f"🚀 Cyber-Defender Non-Stop Run started @ {datetime.now()}")
     end_time = datetime.utcnow() + timedelta(hours=5, minutes=50)
     qa_per_call = 25
-
-    # ফ্রি ওপেনরাউটার মডেল (Nemotron-3 Super)
-    or_model_id = "nvidia/nemotron-3-super:free"   # free, 1M context
 
     cycle_counter = 0
 
@@ -249,16 +315,15 @@ def main():
 
         print(f"📊 Cycle {cycle_counter}: Dark {len(dark_data)} chars, Search {len(search_data)} chars")
 
-        # 2️⃣ Mistral ও Cerebras আলাদা টিমে
+        # 2. Mistral → SEARCH, Cerebras → DARK, বাকি মিক্সড
         assignments = {
             "Groq":          ("DARK", dark_data),
-            "Cerebras":      ("DARK", dark_data),        # Cerebras → DARK
-            "Mistral":       ("SEARCH", search_data),    # Mistral → SEARCH (আলাদা!)
-            "Cohere":        ("DARK", dark_data),        # Cohere-ও DARK-এ
-            "OpenRouter":    ("SEARCH", search_data)     # Nemotron → SEARCH (Mistral-এর সাথে)
+            "Cerebras":      ("DARK", dark_data),
+            "Mistral":       ("SEARCH", search_data),
+            "Cohere":        ("DARK", dark_data),
+            "OpenRouter":    ("SEARCH", search_data)
         }
 
-        # মডেল কী মিসিং থাকলে বাদ দাও
         available = {}
         for name, (role, data) in assignments.items():
             key_env = {
@@ -291,7 +356,7 @@ def main():
                 elif name == "Cohere":
                     fut = executor.submit(lambda n=name, r=role, d=data: (n, r, ask_cohere(d, qa_per_call, n)))
                 elif name == "OpenRouter":
-                    fut = executor.submit(lambda n=name, r=role, d=data: (n, r, ask_openrouter(or_model_id, d, qa_per_call, n)))
+                    fut = executor.submit(lambda n=name, r=role, d=data: (n, r, ask_openrouter(None, d, qa_per_call, n)))
                 futures[fut] = name
 
             for future in as_completed(futures):
@@ -299,7 +364,7 @@ def main():
                 if raw:
                     all_raws.append((source_name, raw, role))
 
-        # 4. পার্সিং ও এন্ট্রি গণনা
+        # 4. পার্সিং
         entries = []
         entries_per_source = {}
         for source_name, raw, role in all_raws:
