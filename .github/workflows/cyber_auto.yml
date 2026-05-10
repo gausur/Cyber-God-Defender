@@ -39,5 +39,6 @@ jobs:
           SHERLOCK_MODELS_API: ${{ secrets.SHERLOCK_MODELS_API }}
           IPINFOLITE_API_KEY: ${{ secrets.IPINFOLITE_API_KEY }}
           ALIENVAULT_API_KEY: ${{ secrets.ALIENVAULT_API_KEY }}
-          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}          # ← নতুন যোগ করা হয়েছে
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}  
+          FEATHERLESS_API_KEY: ${{ secrets.FEATHERLESS_API_KEY }}# ← নতুন যোগ করা হয়েছে
         run: python master_cyber.py
