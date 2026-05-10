@@ -2,3 +2,4 @@ requests
 ddgs
 gdeltdoc
 google-search-results
+groq
