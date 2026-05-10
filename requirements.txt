@@ -1,1 +1,4 @@
 requests
+ddgs
+gdeltdoc
+serpapi
