@@ -8,6 +8,7 @@ from agents.darkweb_team import (
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from groq import Groq
+import cohere
 
 # ======================== SYSTEM MESSAGE ========================
 SYSTEM_MESSAGE = (
@@ -48,7 +49,6 @@ def make_user_prompt(count, text, source_label):
 
 # ======================== API ট্র্যাকিং ========================
 api_tracker = {}
-
 def update_tracker(name, ok, count=0, err=""):
     if name not in api_tracker:
         api_tracker[name] = {"status": "unknown", "last_error": "", "total": 0}
@@ -65,7 +65,6 @@ def update_tracker(name, ok, count=0, err=""):
 def ask_groq(text, count=25, label="Groq"):
     key = os.getenv("GROQ_API_KEY")
     if not key:
-        print("⚠️ Groq key missing")
         return ""
     client = Groq(api_key=key)
     models = ["openai/gpt-oss-120b", "llama-3.1-8b-instant"]
@@ -91,7 +90,6 @@ def ask_groq(text, count=25, label="Groq"):
 def ask_cerebras(text, count=25, label="Cerebras"):
     key = os.getenv("CEREBRAS_API_KEY")
     if not key:
-        print("⚠️ Cerebras key missing")
         return ""
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     user_prompt = make_user_prompt(count, text, label)
@@ -114,7 +112,7 @@ def ask_cerebras(text, count=25, label="Cerebras"):
     return ""
 
 # ---------- Mistral ----------
-def ask_mistral(text, count=30, label="Mistral"):
+def ask_mistral(text, count=25, label="Mistral"):
     key = os.getenv("MISTRAL_API_KEY")
     if not key:
         return ""
@@ -138,7 +136,7 @@ def ask_mistral(text, count=30, label="Mistral"):
         update_tracker(label, False, err=str(e))
     return ""
 
-# ---------- OpenRouter (শুধু DeepSeek-R1) ----------
+# ---------- OpenRouter (Free model) ----------
 def ask_openrouter(model_id, text, count, label):
     key = os.getenv("OPENROUTER_API_KEY")
     if not key:
@@ -162,20 +160,64 @@ def ask_openrouter(model_id, text, count, label):
         update_tracker(label, False, err=str(e))
     return ""
 
-# ---------- পার্সার ----------
+# ---------- Cohere ----------
+def ask_cohere(text, count=25, label="Cohere"):
+    key = os.getenv("COHERE_API_KEY")
+    if not key:
+        print("⚠️ Cohere key missing")
+        return ""
+    co = cohere.Client(key)
+    user_prompt = make_user_prompt(count, text, label)
+    full_prompt = SYSTEM_MESSAGE + "\n\n" + user_prompt
+    try:
+        response = co.chat(message=full_prompt, model="command-a")
+        print(f"✅ {label} success")
+        return response.text
+    except Exception as e:
+        print(f"❌ {label} error: {e}")
+        return ""
+
+# ---------- পার্সার (Groq সহ সব ফরম্যাট) ----------
 def parse_qa_text(raw, source="unknown"):
-    if not raw: return []
+    if not raw:
+        return []
+
+    # 1. Standard format
     matches = re.findall(
         r'\d*\.?\s*(?:Question|Q):\s*(.*?)\n\s*(?:Answer|A):\s*(.*?)(?=\n\s*\d*\.?\s*(?:Question|Q):|$)',
         raw, re.DOTALL | re.IGNORECASE
     )
-    qa = [{"question":q.strip(), "answer":a.strip(), "source":source} for q, a in matches]
-    if qa: return qa
-    matches2 = re.findall(
-        r'\*?\*?(?:Question|Q)\*?\*?:\s*(.*?)\n\s*\*?\*?(?:Answer|A)\*?\*?:\s*(.*?)(?=\n\s*\*?\*?(?:Question|Q)|$)',
+    if matches:
+        return [{"question":q.strip(), "answer":a.strip(), "source":source} for q, a in matches]
+
+    # 2. Markdown style
+    matches = re.findall(
+        r'[*_]*\s*(?:Question|Q)\s*[*_]*\s*:\s*(.*?)\n\s*[*_]*\s*(?:Answer|A)\s*[*_]*\s*:\s*(.*?)(?=\n\s*[*_]*\s*(?:Question|Q)|$)',
         raw, re.DOTALL | re.IGNORECASE
     )
-    return [{"question":q.strip(), "answer":a.strip(), "source":source} for q, a in matches2]
+    if matches:
+        return [{"question":q.strip(), "answer":a.strip(), "source":source} for q, a in matches]
+
+    # 3. Groq-style: detects Q/A separated by newline with ":" prefix
+    lines = raw.split("\n")
+    qa = []
+    i = 0
+    while i < len(lines)-1:
+        line_q = lines[i].strip()
+        line_a = lines[i+1].strip()
+        if (line_q.startswith("Q:") or line_q.startswith("Question:")) and (line_a.startswith("A:") or line_a.startswith("Answer:")):
+            q = line_q.split(":",1)[1].strip()
+            a = line_a.split(":",1)[1].strip()
+            if q and a:
+                qa.append({"question":q, "answer":a, "source":source})
+            i += 2
+        else:
+            i += 1
+    if qa:
+        return qa
+
+    # 4. Fallback: use first 500 chars as raw answer
+    return [{"question": f"Output from {source}", "answer": raw[:500], "source": source}]
 
 def get_output_file():
     return f"dataset_cyber_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jsonl"
@@ -186,9 +228,9 @@ def main():
     end_time = datetime.utcnow() + timedelta(hours=5, minutes=50)
     qa_per_call = 25
 
-    # শুধু কাজ করা মডেল
-    working_llms = ["Groq", "Cerebras", "Mistral", "DeepSeek-R1"]
-    or_model_id = "deepseek/deepseek-r1"
+    # ফ্রি ওপেনরাউটার মডেল (Nemotron-3 Super)
+    or_model_id = "nvidia/nemotron-3-super:free"   # free, 1M context
+
     cycle_counter = 0
 
     while datetime.utcnow() < end_time:
@@ -207,45 +249,50 @@ def main():
 
         print(f"📊 Cycle {cycle_counter}: Dark {len(dark_data)} chars, Search {len(search_data)} chars")
 
-        # 2. টিম ভাগ (সহজ ও নির্ভরযোগ্য)
+        # 2️⃣ Mistral ও Cerebras আলাদা টিমে
         assignments = {
-            "Groq": ("DARK", dark_data),
-            "Cerebras": ("DARK", dark_data),
-            "Mistral": ("DARK", dark_data),
-            "DeepSeek-R1": ("SEARCH", search_data)
+            "Groq":          ("DARK", dark_data),
+            "Cerebras":      ("DARK", dark_data),        # Cerebras → DARK
+            "Mistral":       ("SEARCH", search_data),    # Mistral → SEARCH (আলাদা!)
+            "Cohere":        ("DARK", dark_data),        # Cohere-ও DARK-এ
+            "OpenRouter":    ("SEARCH", search_data)     # Nemotron → SEARCH (Mistral-এর সাথে)
         }
 
-        print("📋 Team Assignments:")
+        # মডেল কী মিসিং থাকলে বাদ দাও
+        available = {}
         for name, (role, data) in assignments.items():
+            key_env = {
+                "Groq": "GROQ_API_KEY", "Cerebras": "CEREBRAS_API_KEY",
+                "Mistral": "MISTRAL_API_KEY", "Cohere": "COHERE_API_KEY",
+                "OpenRouter": "OPENROUTER_API_KEY"
+            }.get(name)
+            if key_env and not os.getenv(key_env):
+                print(f"⚠️ {name}: key missing, skipping")
+                continue
+            available[name] = (role, data)
+
+        print("📋 Team Assignments:")
+        for name, (role, data) in available.items():
             preview = str(data)[:80].replace("\n", " ")
             print(f"  {name} → {role} (Data: {preview}...)")
             update_tracker(name, True, count=0, err=f"Role: {role}")
 
         # 3. প্যারালাল LLM কল
         all_raws = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=len(available)) as executor:
             futures = {}
-
-            # Groq
-            futures[executor.submit(
-                lambda: ("Groq", assignments["Groq"][0], ask_groq(assignments["Groq"][1], qa_per_call, "Groq"))
-            )] = "Groq"
-
-            # Cerebras
-            futures[executor.submit(
-                lambda: ("Cerebras", assignments["Cerebras"][0], ask_cerebras(assignments["Cerebras"][1], qa_per_call, "Cerebras"))
-            )] = "Cerebras"
-
-            # Mistral
-            futures[executor.submit(
-                lambda: ("Mistral", assignments["Mistral"][0], ask_mistral(assignments["Mistral"][1], qa_per_call, "Mistral"))
-            )] = "Mistral"
-
-            # DeepSeek-R1
-            role_deepseek, data_deepseek = assignments["DeepSeek-R1"]
-            futures[executor.submit(
-                lambda: ("DeepSeek-R1", role_deepseek, ask_openrouter(or_model_id, data_deepseek, qa_per_call, "DeepSeek-R1"))
-            )] = "DeepSeek-R1"
+            for name, (role, data) in available.items():
+                if name == "Groq":
+                    fut = executor.submit(lambda n=name, r=role, d=data: (n, r, ask_groq(d, qa_per_call, n)))
+                elif name == "Cerebras":
+                    fut = executor.submit(lambda n=name, r=role, d=data: (n, r, ask_cerebras(d, qa_per_call, n)))
+                elif name == "Mistral":
+                    fut = executor.submit(lambda n=name, r=role, d=data: (n, r, ask_mistral(d, qa_per_call, n)))
+                elif name == "Cohere":
+                    fut = executor.submit(lambda n=name, r=role, d=data: (n, r, ask_cohere(d, qa_per_call, n)))
+                elif name == "OpenRouter":
+                    fut = executor.submit(lambda n=name, r=role, d=data: (n, r, ask_openrouter(or_model_id, d, qa_per_call, n)))
+                futures[fut] = name
 
             for future in as_completed(futures):
                 source_name, role, raw = future.result()
