@@ -1,0 +1,38 @@
+name: Cyber-Defender-Continuous
+on:
+  schedule:
+    - cron: '0 * * * *'          # প্রতি ১ ঘণ্টায় অটোমেটিক রান
+  workflow_dispatch:              # ম্যানুয়ালি রান করার জন্য
+
+permissions:
+  contents: write                 # রিপোজিটরিতে পুশ করতে দরকার
+
+concurrency:
+  group: cyber-nonstop
+  cancel-in-progress: false       # আগের রান চলতে থাকলে নতুন রান বাতিল হবে না
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360          # সর্বোচ্চ ৬ ঘণ্টা চলবে
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0           # সম্পূর্ণ গিট হিস্টরি প্রয়োজন
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Master Cyber
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FEATHERLESS_API_KEY: ${{ secrets.FEATHERLESS_API_KEY }}
+          SHERLOCK_MODELS_API: ${{ secrets.SHERLOCK_MODELS_API }}
+          REPOSITORY: ${{ github.repository }}
+        run: python master_cyber.py
