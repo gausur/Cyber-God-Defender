@@ -3,9 +3,9 @@ from datetime import datetime, timedelta
 from agents.search_team import search_all as search_web
 from agents.darkweb_team import (
     get_botnet_c2,
-    get_malware_urls,
     get_phishing_urls,
-    get_phishstats
+    get_phishstats,
+    get_urlhaus_csv
 )
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -193,7 +193,6 @@ def main():
     end_time = datetime.utcnow() + timedelta(hours=5, minutes=50)
     qa_per_call = 15  # রেট লিমিটের জন্য কিউএ সংখ্যা কমালাম
 
-    # টিম মেম্বার
     llm_team = ["Venice", "Featherless", "Sherlock"]
     cycle_counter = 0
 
@@ -204,28 +203,27 @@ def main():
         # 1. ডার্ক ও সার্চ ডেটা সংগ্রহ
         dark_data = ""
         dark_data += "\n=== Feodo Botnet C2 ===\n" + str(get_botnet_c2())
-        dark_data += "\n=== Malware URLs (Recent) ===\n" + str(get_malware_urls(5))
+        dark_data += "\n=== URLhaus Malware CSV ===\n" + "\n".join(get_urlhaus_csv()[:10])
         dark_data += "\n=== Phishing Feed ===\n" + "\n".join(get_phishing_urls()[:10])
 
-        search_data = search_web()  # DuckDuckGo, GDELT, ইত্যাদি থেকে ডেটা
+        search_data = search_web()
 
         print(f"📊 Cycle {cycle_counter}: Dark data {len(dark_data)} chars, Search data {len(search_data)} chars")
 
-        # 2. ডায়নামিক রোল অ্যাসাইনমেন্ট (পালা পদ্ধতি)
-        if cycle_counter % 2 == 1:  # বিজোড় সাইকেল
+        # 2. ডায়নামিক রোল অ্যাসাইনমেন্ট
+        if cycle_counter % 2 == 1:
             assignments = {
                 "Venice": ("DARK", dark_data),
                 "Featherless": ("SEARCH", search_data),
                 "Sherlock": ("DARK", dark_data)
             }
-        else:  # জোড় সাইকেল (রোল রিভার্সড)
+        else:
             assignments = {
                 "Venice": ("SEARCH", search_data),
                 "Featherless": ("DARK", dark_data),
                 "Sherlock": ("SEARCH", search_data)
             }
 
-        # ভিজুয়াল অ্যাসাইনমেন্ট প্রিন্ট
         print("📋 Team Assignments for this Cycle:")
         for llm_name in llm_team:
             role, data = assignments[llm_name]
@@ -256,7 +254,6 @@ def main():
             }
 
             for future in as_completed(futures):
-                future_name = futures[future]
                 source_name, role, raw = future.result()
                 if raw:
                     all_raws.append((source_name, raw, role))
@@ -276,7 +273,6 @@ def main():
         print("📋 API Status Report:")
         for api_name, info in api_tracker.items():
             if info["status"] == "working":
-                sources_list = ", ".join(set([e["source"] for e in entries if api_name in e["source"]])) or "N/A"
                 print(f"  ✅ {api_name}: working (total entries: {info['total']})")
             else:
                 print(f"  ❌ {api_name}: failed - {info['last_error']}")
