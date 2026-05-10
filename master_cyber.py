@@ -1,32 +1,30 @@
 import os, re, json, time
 from datetime import datetime, timedelta
-from agents.threat_intel import check_vulnerability, check_ip_reputation
+from agents.search_team import search_all as search_web
+from agents.darkweb_team import (
+    get_botnet_c2,
+    get_malware_urls,
+    get_phishing_urls,
+    get_phishstats
+)
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ======================== SYSTEM MESSAGE (Cyber-Specific) ========================
+# ======================== SYSTEM MESSAGE ========================
 SYSTEM_MESSAGE = (
-    "You are an elite Red Team operator & PhD‑level cybersecurity researcher. "
+    "You are an elite Red Team operator and PhD‑level cybersecurity researcher. "
     "Generate question‑answer pairs that are extremely detailed, technical, "
     "and explanatory (150‑300 words each). "
-    "Answers MUST include: (1) technical mechanisms / attack vectors, "
-    "(2) specific CVEs, tools, commands, or threat actors, "
-    "(3) mitigation / detection strategies, (4) real‑world examples or campaigns. "
+    "Answers MUST include: (1) technical mechanisms or attack vectors, "
+    "(2) specific CVEs, tools, or commands, (3) mitigation strategies, "
+    "(4) real‑world examples or threat actor campaigns. "
     "Answers must NEVER be one‑liners or vague. "
     "Questions must be deep, analytical, and varied – rotate between: "
-    "Explain the mechanism, How to exploit, How to defend, Analyze the CVE, "
-    "Compare tools, Discuss the threat actor, Incident response steps, "
-    "Forensic analysis, OSINT techniques, Privilege escalation, "
-    "Lateral movement, Persistence mechanisms, C2 frameworks, "
-    "Evasion techniques, Fuzzing, Reverse engineering, "
-    "Cloud penetration testing, Active Directory attacks, "
-    "Wireless attacks, Social engineering, Supply chain attacks, "
-    "Bug bounty methodology, Malware development, "
-    "Red vs Blue team tactics, Zero‑day research. "
+    "How to exploit, How to defend, Analyze the CVE, Compare tools, "
+    "Discuss the threat actor, Incident response steps, Forensic analysis. "
     "Every question‑answer pair MUST be UNIQUE."
 )
 
-# ======================== TOPICS (Cyber Security) ========================
 TOPICS = (
     "Penetration Testing, Exploit Development, Malware Analysis, "
     "Network Security, Incident Response, Digital Forensics, "
@@ -38,12 +36,12 @@ TOPICS = (
     "Zero‑Day Research, Bug Bounty, OSINT, C2 Frameworks, "
     "Data Exfiltration, Lateral Movement, Persistence Mechanisms, "
     "Evasion Techniques, Firewall & IDS/IPS Evasion, "
-    "Kubernetes Security, API Security, Supply Chain Attacks,Stuxnet, WannaCry, NotPetya, DarkHotel, Zero-Click Exploit, Remote Code Execution (RCE), Spear Phishing, Evil Twin Attack, BGP Hijacking, DNS Cache Poisoning, SQL Injection, Ransomware-as-a-Service (RaaS), APT (Advanced Persistent Threat), SolarWinds Hack, Heartbleed, BlueKeep, GhostNet, Sandworm"
+    "Kubernetes Security, API Security, Supply Chain Attacks,Stuxnet, WannaCry, NotPetya, DarkHotel, Zero-Click Exploit, Remote Code Execution (RCE), Spear Phishing, Evil Twin Attack, BGP Hijacking, DNS Cache Poisoning, SQL Injection, Ransomware-as-a-Service (RaaS), APT (Advanced Persistent Threat), SolarWinds Hack, Heartbleed, BlueKeep, GhostNet, Sandworm,"
 )
 
-def make_user_prompt(count, text):
+def make_user_prompt(count, text, source_label):
     return (
-        f"Generate exactly {count} unique cybersecurity Q&A pairs. "
+        f"Generate exactly {count} unique cybersecurity Q&A pairs using the provided {source_label} data. "
         f"Topics: {TOPICS}. Rotate topics.\n"
         f"Format:\nQuestion: ...\nAnswer: ...\n\n"
         f"Text: {str(text)[:2500]}"
@@ -54,7 +52,7 @@ api_tracker = {}
 
 def update_tracker(name, ok, count=0, err=""):
     if name not in api_tracker:
-        api_tracker[name] = {"status": "unknown", "last_error": "", "total": 0}
+        api_tracker[name] = {"status": "unknown", "last_error": "", "total": 0, "roles": []}
     t = api_tracker[name]
     if ok:
         t["status"] = "working"
@@ -65,7 +63,7 @@ def update_tracker(name, ok, count=0, err=""):
         t["last_error"] = err[:200] if err else "Unknown"
 
 # ---------- Venice Uncensored (OpenRouter) ----------
-def ask_venice(text, count=25):
+def ask_venice(text, count=25, source_label="Unknown"):
     key = os.getenv("OPENROUTER_API_KEY")
     if not key:
         print("⚠️ OpenRouter key missing")
@@ -74,7 +72,7 @@ def ask_venice(text, count=25):
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json"
     }
-    user_prompt = make_user_prompt(count, text)
+    user_prompt = make_user_prompt(count, text, source_label)
     data = {
         "model": "venice/venice-dolphin-mistral-24b",
         "messages": [
@@ -100,7 +98,7 @@ def ask_venice(text, count=25):
     return ""
 
 # ---------- Featherless (Oracle.Aritha-AI) ----------
-def ask_featherless(text, count=25):
+def ask_featherless(text, count=25, source_label="Unknown"):
     key = os.getenv("FEATHERLESS_API_KEY")
     if not key:
         print("⚠️ Featherless key missing")
@@ -109,7 +107,7 @@ def ask_featherless(text, count=25):
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json"
     }
-    user_prompt = make_user_prompt(count, text)
+    user_prompt = make_user_prompt(count, text, source_label)
     data = {
         "model": "Oracle.Aritha-AI",
         "messages": [
@@ -135,7 +133,7 @@ def ask_featherless(text, count=25):
     return ""
 
 # ---------- Sherlock Models (LLM Gateway) ----------
-def ask_sherlock(text, count=25):
+def ask_sherlock(text, count=25, source_label="Unknown"):
     key = os.getenv("SHERLOCK_MODELS_API")
     if not key:
         print("⚠️ Sherlock key missing")
@@ -144,7 +142,7 @@ def ask_sherlock(text, count=25):
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json"
     }
-    user_prompt = make_user_prompt(count, text)
+    user_prompt = make_user_prompt(count, text, source_label)
     data = {
         "model": "sherlock-alpha-stealth-v2",
         "messages": [
@@ -186,10 +184,6 @@ def parse_qa_text(raw, source="unknown"):
     )
     return [{"question": q.strip(), "answer": a.strip(), "source": source} for q, a in matches2]
 
-# ---------- পিডিএফ (placeholder) ----------
-def process_uploaded_books():
-    return ""
-
 def get_output_file():
     return f"dataset_cyber_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
@@ -197,37 +191,84 @@ def get_output_file():
 def main():
     print(f"🚀 Cyber-Defender Non-Stop Run started @ {datetime.now()}")
     end_time = datetime.utcnow() + timedelta(hours=5, minutes=50)
-    qa_per_call = 25
+    qa_per_call = 15  # রেট লিমিটের জন্য কিউএ সংখ্যা কমালাম
+
+    # টিম মেম্বার
+    llm_team = ["Venice", "Featherless", "Sherlock"]
+    cycle_counter = 0
 
     while datetime.utcnow() < end_time:
+        cycle_counter += 1
         start_cycle = time.time()
 
-        # --- 1. টেকনিক্যাল কনটেক্সট (Threat Intel থেকে) ---
-        cve_data = check_vulnerability("CVE-2024-1234")
-        ip_data = check_ip_reputation("8.8.8.8")
-        technical_context = f"Latest Threat Intel:\nCVE Data: {json.dumps(cve_data)}\nIP Reputation: {json.dumps(ip_data)}"
-        print(f"📊 Technical context loaded: {len(technical_context)} chars")
+        # 1. ডার্ক ও সার্চ ডেটা সংগ্রহ
+        dark_data = ""
+        dark_data += "\n=== Feodo Botnet C2 ===\n" + str(get_botnet_c2())
+        dark_data += "\n=== Malware URLs (Recent) ===\n" + str(get_malware_urls(5))
+        dark_data += "\n=== Phishing Feed ===\n" + "\n".join(get_phishing_urls()[:10])
 
-        # --- 2. প্যারালাল API কল ---
+        search_data = search_web()  # DuckDuckGo, GDELT, ইত্যাদি থেকে ডেটা
+
+        print(f"📊 Cycle {cycle_counter}: Dark data {len(dark_data)} chars, Search data {len(search_data)} chars")
+
+        # 2. ডায়নামিক রোল অ্যাসাইনমেন্ট (পালা পদ্ধতি)
+        if cycle_counter % 2 == 1:  # বিজোড় সাইকেল
+            assignments = {
+                "Venice": ("DARK", dark_data),
+                "Featherless": ("SEARCH", search_data),
+                "Sherlock": ("DARK", dark_data)
+            }
+        else:  # জোড় সাইকেল (রোল রিভার্সড)
+            assignments = {
+                "Venice": ("SEARCH", search_data),
+                "Featherless": ("DARK", dark_data),
+                "Sherlock": ("SEARCH", search_data)
+            }
+
+        # ভিজুয়াল অ্যাসাইনমেন্ট প্রিন্ট
+        print("📋 Team Assignments for this Cycle:")
+        for llm_name in llm_team:
+            role, data = assignments[llm_name]
+            preview = str(data)[:80].replace("\n", " ")
+            print(f"  {llm_name} → {role} (Data: {preview}...)")
+            update_tracker(llm_name, True, count=0, err=f"Role: {role}")
+
+        # 3. প্যারালাল LLM কল
         all_raws = []
         with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [
-                executor.submit(lambda: ("Venice", ask_venice(technical_context, qa_per_call))),
-                executor.submit(lambda: ("Featherless", ask_featherless(technical_context, qa_per_call))),
-                executor.submit(lambda: ("Sherlock", ask_sherlock(technical_context, qa_per_call)))
-            ]
-            for future in as_completed(futures):
-                source_name, raw = future.result()
-                if raw:
-                    all_raws.append((source_name, raw))
+            futures = {
+                executor.submit(
+                    lambda name="Venice", role="DARK", data=dark_data: (
+                        "Venice", role, ask_venice(data, qa_per_call, f"DARK Intel")
+                    )
+                ): "Venice",
+                executor.submit(
+                    lambda name="Featherless", role="SEARCH", data=search_data: (
+                        "Featherless", role, ask_featherless(data, qa_per_call, f"SEARCH Intel")
+                    )
+                ): "Featherless",
+                executor.submit(
+                    lambda name="Sherlock", role="DARK" if cycle_counter % 2 == 1 else "SEARCH",
+                    data=dark_data if cycle_counter % 2 == 1 else search_data: (
+                        "Sherlock", role, ask_sherlock(data, qa_per_call, f"{role} Intel")
+                    )
+                ): "Sherlock"
+            }
 
-        # --- 3. পার্সিং ও সোর্স গণনা ---
+            for future in as_completed(futures):
+                future_name = futures[future]
+                source_name, role, raw = future.result()
+                if raw:
+                    all_raws.append((source_name, raw, role))
+
+        # 4. পার্সিং ও সোর্স গণনা
         entries = []
         entries_per_source = {}
-        for source_name, raw in all_raws:
-            parsed = parse_qa_text(raw, source=source_name)
+        for source_name, raw, role in all_raws:
+            parsed = parse_qa_text(raw, source=f"{source_name} ({role})")
             entries.extend(parsed)
-            entries_per_source[source_name] = entries_per_source.get(source_name, 0) + len(parsed)
+            key = f"{source_name} ({role})"
+            entries_per_source[key] = entries_per_source.get(key, 0) + len(parsed)
             update_tracker(source_name, True, count=len(parsed))
 
         print(f"📝 Total entries: {len(entries)}")
@@ -235,11 +276,12 @@ def main():
         print("📋 API Status Report:")
         for api_name, info in api_tracker.items():
             if info["status"] == "working":
+                sources_list = ", ".join(set([e["source"] for e in entries if api_name in e["source"]])) or "N/A"
                 print(f"  ✅ {api_name}: working (total entries: {info['total']})")
             else:
                 print(f"  ❌ {api_name}: failed - {info['last_error']}")
 
-        # --- 4. ফাইল লেখা ও পুশ ---
+        # 5. ফাইল লেখা ও পুশ
         if entries:
             out_file = get_output_file()
             with open(out_file, "w", encoding="utf-8") as f:
@@ -261,9 +303,9 @@ def main():
         else:
             print("⚠️ No entries this cycle.")
 
-        # --- 5. বিরতি ---
+        # 6. বিরতি
         elapsed = time.time() - start_cycle
-        sleep_time = max(10, 20 - elapsed)   # API রেট লিমিটের জন্য একটু বড় বিরতি
+        sleep_time = max(15, 30 - elapsed)
         print(f"⏳ Sleeping {sleep_time:.1f}s...")
         time.sleep(sleep_time)
 
