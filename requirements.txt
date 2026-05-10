@@ -1,4 +1,4 @@
 requests
 ddgs
 gdeltdoc
-serpapi
+google-search-results
