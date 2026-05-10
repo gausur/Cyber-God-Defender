@@ -5,7 +5,9 @@ from agents.darkweb_team import (
     get_botnet_c2,
     get_phishing_urls,
     get_phishstats,
-    get_urlhaus_csv
+    get_urlhaus_csv,
+    get_ipinfo,
+    get_otx_pulses
 )
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,7 +38,7 @@ TOPICS = (
     "Zero‑Day Research, Bug Bounty, OSINT, C2 Frameworks, "
     "Data Exfiltration, Lateral Movement, Persistence Mechanisms, "
     "Evasion Techniques, Firewall & IDS/IPS Evasion, "
-    "Kubernetes Security, API Security, Supply Chain Attacks,Stuxnet, WannaCry, NotPetya, DarkHotel, Zero-Click Exploit, Remote Code Execution (RCE), Spear Phishing, Evil Twin Attack, BGP Hijacking, DNS Cache Poisoning, SQL Injection, Ransomware-as-a-Service (RaaS), APT (Advanced Persistent Threat), SolarWinds Hack, Heartbleed, BlueKeep, GhostNet, Sandworm,"
+    "Kubernetes Security, API Security, Supply Chain Attacks"
 )
 
 def make_user_prompt(count, text, source_label):
@@ -52,7 +54,7 @@ api_tracker = {}
 
 def update_tracker(name, ok, count=0, err=""):
     if name not in api_tracker:
-        api_tracker[name] = {"status": "unknown", "last_error": "", "total": 0, "roles": []}
+        api_tracker[name] = {"status": "unknown", "last_error": "", "total": 0}
     t = api_tracker[name]
     if ok:
         t["status"] = "working"
@@ -62,19 +64,50 @@ def update_tracker(name, ok, count=0, err=""):
         t["status"] = "failed"
         t["last_error"] = err[:200] if err else "Unknown"
 
-# ---------- Venice Uncensored (OpenRouter) ----------
-def ask_venice(text, count=25, source_label="Unknown"):
+# ---------- Mistral ----------
+def ask_mistral(text, count=30, label="Mistral"):
+    key = os.getenv("MISTRAL_API_KEY")
+    if not key:
+        print("⚠️ Mistral key missing")
+        return ""
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    user_prompt = make_user_prompt(count, text, label)
+    data = {
+        "model": "mistral-small",
+        "messages": [
+            {"role": "system", "content": SYSTEM_MESSAGE},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.9,
+        "max_tokens": 8192
+    }
+    try:
+        r = requests.post("https://api.mistral.ai/v1/chat/completions",
+                          headers=headers, json=data, timeout=90)
+        if r.status_code == 200:
+            print("✅ Mistral success")
+            return r.json()["choices"][0]["message"]["content"]
+        else:
+            print(f"❌ Mistral HTTP {r.status_code}: {r.text[:150]}")
+            update_tracker("Mistral", False, err=f"HTTP {r.status_code}")
+    except Exception as e:
+        print(f"❌ Mistral exception: {e}")
+        update_tracker("Mistral", False, err=str(e))
+    return ""
+
+# ---------- OpenRouter Helper ----------
+def ask_openrouter(model_id, text, count, label):
     key = os.getenv("OPENROUTER_API_KEY")
     if not key:
-        print("⚠️ OpenRouter key missing")
+        print(f"⚠️ OpenRouter key missing for {label}")
         return ""
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json"
     }
-    user_prompt = make_user_prompt(count, text, source_label)
+    user_prompt = make_user_prompt(count, text, label)
     data = {
-        "model": "venice/venice-dolphin-mistral-24b",
+        "model": model_id,
         "messages": [
             {"role": "system", "content": SYSTEM_MESSAGE},
             {"role": "user", "content": user_prompt}
@@ -90,50 +123,15 @@ def ask_venice(text, count=25, source_label="Unknown"):
         if r.status_code == 200:
             return r.json()["choices"][0]["message"]["content"]
         else:
-            print(f"❌ Venice HTTP {r.status_code}: {r.text[:150]}")
-            update_tracker("Venice", False, err=f"HTTP {r.status_code}")
+            print(f"❌ {label} HTTP {r.status_code}: {r.text[:200]}")
+            update_tracker(label, False, err=f"HTTP {r.status_code}")
     except Exception as e:
-        print(f"❌ Venice exception: {e}")
-        update_tracker("Venice", False, err=str(e))
-    return ""
-
-# ---------- Featherless (Oracle.Aritha-AI) ----------
-def ask_featherless(text, count=25, source_label="Unknown"):
-    key = os.getenv("FEATHERLESS_API_KEY")
-    if not key:
-        print("⚠️ Featherless key missing")
-        return ""
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json"
-    }
-    user_prompt = make_user_prompt(count, text, source_label)
-    data = {
-        "model": "Oracle.Aritha-AI",
-        "messages": [
-            {"role": "system", "content": SYSTEM_MESSAGE},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.9,
-        "max_tokens": 8096
-    }
-    try:
-        r = requests.post(
-            "https://api.featherless.ai/v1/chat/completions",
-            headers=headers, json=data, timeout=90
-        )
-        if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"]
-        else:
-            print(f"❌ Featherless HTTP {r.status_code}: {r.text[:150]}")
-            update_tracker("Featherless", False, err=f"HTTP {r.status_code}")
-    except Exception as e:
-        print(f"❌ Featherless exception: {e}")
-        update_tracker("Featherless", False, err=str(e))
+        print(f"❌ {label} exception: {e}")
+        update_tracker(label, False, err=str(e))
     return ""
 
 # ---------- Sherlock Models (LLM Gateway) ----------
-def ask_sherlock(text, count=25, source_label="Unknown"):
+def ask_sherlock(text, count=25, label="Sherlock"):
     key = os.getenv("SHERLOCK_MODELS_API")
     if not key:
         print("⚠️ Sherlock key missing")
@@ -142,9 +140,10 @@ def ask_sherlock(text, count=25, source_label="Unknown"):
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json"
     }
-    user_prompt = make_user_prompt(count, text, source_label)
+    user_prompt = make_user_prompt(count, text, label)
+    # Sherlock-এ কাজ করা একটি মডেলের নাম:
     data = {
-        "model": "sherlock-alpha-stealth-v2",
+        "model": "sherlock-dash-alpha",
         "messages": [
             {"role": "system", "content": SYSTEM_MESSAGE},
             {"role": "user", "content": user_prompt}
@@ -191,74 +190,88 @@ def get_output_file():
 def main():
     print(f"🚀 Cyber-Defender Non-Stop Run started @ {datetime.now()}")
     end_time = datetime.utcnow() + timedelta(hours=5, minutes=50)
-    qa_per_call = 15  # রেট লিমিটের জন্য কিউএ সংখ্যা কমালাম
+    qa_per_call = 25
 
-    llm_team = ["Venice", "Featherless", "Sherlock"]
+    # OpenRouter-এর বর্তমানে কাজ করা ৩টি ফ্রি মডেল (তোর নিজের Key-তেই চলবে)
+    or_models = {
+        "DeepSeek-R1": "deepseek/deepseek-r1",
+        "Llama-3.1": "meta-llama/llama-3.1-8b-instant",
+        "Gemma-2": "google/gemma-2-9b-it"
+    }
     cycle_counter = 0
 
     while datetime.utcnow() < end_time:
         cycle_counter += 1
         start_cycle = time.time()
 
-        # 1. ডার্ক ও সার্চ ডেটা সংগ্রহ
+        # 1. ডেটা সংগ্রহ
         dark_data = ""
-        dark_data += "\n=== Feodo Botnet C2 ===\n" + str(get_botnet_c2())
-        dark_data += "\n=== URLhaus Malware CSV ===\n" + "\n".join(get_urlhaus_csv()[:10])
+        dark_data += "\n=== Feodo C2 ===\n" + str(get_botnet_c2())
+        dark_data += "\n=== URLhaus CSV ===\n" + "\n".join(get_urlhaus_csv()[:10])
         dark_data += "\n=== Phishing Feed ===\n" + "\n".join(get_phishing_urls()[:10])
+        dark_data += "\n=== IPinfo ===\n" + str(get_ipinfo("8.8.8.8"))
+        dark_data += "\n=== OTX Pulses ===\n" + str(get_otx_pulses())
 
         search_data = search_web()
 
-        print(f"📊 Cycle {cycle_counter}: Dark data {len(dark_data)} chars, Search data {len(search_data)} chars")
+        print(f"📊 Cycle {cycle_counter}: Dark {len(dark_data)} chars, Search {len(search_data)} chars")
 
-        # 2. ডায়নামিক রোল অ্যাসাইনমেন্ট
+        # 2. টিম ভাগ
+        llm_names = ["Mistral", "Sherlock", "DeepSeek-R1", "Llama-3.1", "Gemma-2"]
+        assignments = {}
+
+        # Mistral — সবসময় DARK (সবচেয়ে নির্ভরযোগ্য)
+        assignments["Mistral"] = ("DARK", dark_data)
+        # Sherlock — SEARCH
+        assignments["Sherlock"] = ("SEARCH", search_data)
+
+        # OpenRouter মডেল — ডায়নামিক
         if cycle_counter % 2 == 1:
-            assignments = {
-                "Venice": ("DARK", dark_data),
-                "Featherless": ("SEARCH", search_data),
-                "Sherlock": ("DARK", dark_data)
-            }
+            assignments["DeepSeek-R1"] = ("DARK", dark_data)
+            assignments["Llama-3.1"] = ("SEARCH", search_data)
+            assignments["Gemma-2"] = ("SEARCH", search_data)
         else:
-            assignments = {
-                "Venice": ("SEARCH", search_data),
-                "Featherless": ("DARK", dark_data),
-                "Sherlock": ("SEARCH", search_data)
-            }
+            assignments["DeepSeek-R1"] = ("SEARCH", search_data)
+            assignments["Llama-3.1"] = ("DARK", dark_data)
+            assignments["Gemma-2"] = ("DARK", dark_data)
 
-        print("📋 Team Assignments for this Cycle:")
-        for llm_name in llm_team:
-            role, data = assignments[llm_name]
+        print("📋 Team Assignments:")
+        for name, (role, data) in assignments.items():
             preview = str(data)[:80].replace("\n", " ")
-            print(f"  {llm_name} → {role} (Data: {preview}...)")
-            update_tracker(llm_name, True, count=0, err=f"Role: {role}")
+            print(f"  {name} → {role} (Data: {preview}...)")
+            update_tracker(name, True, count=0, err=f"Role: {role}")
 
         # 3. প্যারালাল LLM কল
         all_raws = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {
-                executor.submit(
-                    lambda name="Venice", role="DARK", data=dark_data: (
-                        "Venice", role, ask_venice(data, qa_per_call, f"DARK Intel")
-                    )
-                ): "Venice",
-                executor.submit(
-                    lambda name="Featherless", role="SEARCH", data=search_data: (
-                        "Featherless", role, ask_featherless(data, qa_per_call, f"SEARCH Intel")
-                    )
-                ): "Featherless",
-                executor.submit(
-                    lambda name="Sherlock", role="DARK" if cycle_counter % 2 == 1 else "SEARCH",
-                    data=dark_data if cycle_counter % 2 == 1 else search_data: (
-                        "Sherlock", role, ask_sherlock(data, qa_per_call, f"{role} Intel")
-                    )
-                ): "Sherlock"
-            }
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {}
+
+            # Mistral
+            futures[executor.submit(
+                lambda: ("Mistral", assignments["Mistral"][0],
+                         ask_mistral(assignments["Mistral"][1], qa_per_call, "Mistral"))
+            )] = "Mistral"
+
+            # Sherlock
+            futures[executor.submit(
+                lambda: ("Sherlock", assignments["Sherlock"][0],
+                         ask_sherlock(assignments["Sherlock"][1], qa_per_call, "Sherlock"))
+            )] = "Sherlock"
+
+            # OpenRouter মডেল
+            for name, model_id in or_models.items():
+                role, data = assignments[name]
+                futures[executor.submit(
+                    lambda n=name, m=model_id, d=data, r=role:
+                        (n, r, ask_openrouter(m, d, qa_per_call, n))
+                )] = name
 
             for future in as_completed(futures):
                 source_name, role, raw = future.result()
                 if raw:
                     all_raws.append((source_name, raw, role))
 
-        # 4. পার্সিং ও সোর্স গণনা
+        # 4. পার্সিং ও এন্ট্রি গণনা
         entries = []
         entries_per_source = {}
         for source_name, raw, role in all_raws:
@@ -273,11 +286,11 @@ def main():
         print("📋 API Status Report:")
         for api_name, info in api_tracker.items():
             if info["status"] == "working":
-                print(f"  ✅ {api_name}: working (total entries: {info['total']})")
+                print(f"  ✅ {api_name}: working (total: {info['total']})")
             else:
                 print(f"  ❌ {api_name}: failed - {info['last_error']}")
 
-        # 5. ফাইল লেখা ও পুশ
+        # 5. ফাইল ও পুশ
         if entries:
             out_file = get_output_file()
             with open(out_file, "w", encoding="utf-8") as f:
@@ -299,9 +312,8 @@ def main():
         else:
             print("⚠️ No entries this cycle.")
 
-        # 6. বিরতি
         elapsed = time.time() - start_cycle
-        sleep_time = max(15, 30 - elapsed)
+        sleep_time = max(10, 20 - elapsed)
         print(f"⏳ Sleeping {sleep_time:.1f}s...")
         time.sleep(sleep_time)
 
