@@ -142,7 +142,7 @@ def ask_sherlock(text, count=25, label="Sherlock"):
     }
     user_prompt = make_user_prompt(count, text, label)
     data = {
-        "model": "sherlock-dash-alpha",
+        "model": "sherlock/sherlock-dash-alpha",
         "messages": [
             {"role": "system", "content": SYSTEM_MESSAGE},
             {"role": "user", "content": user_prompt}
