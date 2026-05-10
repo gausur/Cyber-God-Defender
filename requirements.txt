@@ -3,3 +3,4 @@ ddgs
 gdeltdoc
 google-search-results
 groq
+cohere
