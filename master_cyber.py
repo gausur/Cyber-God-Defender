@@ -68,7 +68,7 @@ def update_tracker(name, ok, count=0, err=""):
 def ask_mistral(text, count=30, label="Mistral"):
     key = os.getenv("MISTRAL_API_KEY")
     if not key:
-        print("⚠️ Mistral key missing")
+        print("⚠️ Mistral key not set")
         return ""
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     user_prompt = make_user_prompt(count, text, label)
@@ -85,21 +85,21 @@ def ask_mistral(text, count=30, label="Mistral"):
         r = requests.post("https://api.mistral.ai/v1/chat/completions",
                           headers=headers, json=data, timeout=90)
         if r.status_code == 200:
-            print("✅ Mistral success")
+            print(f"✅ {label} success")
             return r.json()["choices"][0]["message"]["content"]
         else:
-            print(f"❌ Mistral HTTP {r.status_code}: {r.text[:150]}")
-            update_tracker("Mistral", False, err=f"HTTP {r.status_code}")
+            print(f"❌ {label} HTTP {r.status_code}")
+            update_tracker(label, False, err=f"HTTP {r.status_code}")
     except Exception as e:
-        print(f"❌ Mistral exception: {e}")
-        update_tracker("Mistral", False, err=str(e))
+        print(f"❌ {label} exception: {e}")
+        update_tracker(label, False, err=str(e))
     return ""
 
 # ---------- OpenRouter Helper ----------
 def ask_openrouter(model_id, text, count, label):
     key = os.getenv("OPENROUTER_API_KEY")
     if not key:
-        print(f"⚠️ OpenRouter key missing for {label}")
+        print(f"⚠️ OpenRouter key not set")
         return ""
     headers = {
         "Authorization": f"Bearer {key}",
@@ -123,25 +123,24 @@ def ask_openrouter(model_id, text, count, label):
         if r.status_code == 200:
             return r.json()["choices"][0]["message"]["content"]
         else:
-            print(f"❌ {label} HTTP {r.status_code}: {r.text[:200]}")
+            print(f"❌ {label} HTTP {r.status_code}")
             update_tracker(label, False, err=f"HTTP {r.status_code}")
     except Exception as e:
         print(f"❌ {label} exception: {e}")
         update_tracker(label, False, err=str(e))
     return ""
 
-# ---------- Sherlock Models (LLM Gateway) ----------
+# ---------- Sherlock ----------
 def ask_sherlock(text, count=25, label="Sherlock"):
     key = os.getenv("SHERLOCK_MODELS_API")
     if not key:
-        print("⚠️ Sherlock key missing")
+        print("⚠️ Sherlock key not set")
         return ""
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json"
     }
     user_prompt = make_user_prompt(count, text, label)
-    # Sherlock-এ কাজ করা একটি মডেলের নাম:
     data = {
         "model": "sherlock-dash-alpha",
         "messages": [
@@ -159,11 +158,11 @@ def ask_sherlock(text, count=25, label="Sherlock"):
         if r.status_code == 200:
             return r.json()["choices"][0]["message"]["content"]
         else:
-            print(f"❌ Sherlock HTTP {r.status_code}: {r.text[:150]}")
-            update_tracker("Sherlock", False, err=f"HTTP {r.status_code}")
+            print(f"❌ {label} HTTP {r.status_code}")
+            update_tracker(label, False, err=f"HTTP {r.status_code}")
     except Exception as e:
-        print(f"❌ Sherlock exception: {e}")
-        update_tracker("Sherlock", False, err=str(e))
+        print(f"❌ {label} exception: {e}")
+        update_tracker(label, False, err=str(e))
     return ""
 
 # ---------- পার্সার ----------
@@ -192,7 +191,6 @@ def main():
     end_time = datetime.utcnow() + timedelta(hours=5, minutes=50)
     qa_per_call = 25
 
-    # OpenRouter-এর বর্তমানে কাজ করা ৩টি ফ্রি মডেল (তোর নিজের Key-তেই চলবে)
     or_models = {
         "DeepSeek-R1": "deepseek/deepseek-r1",
         "Llama-3.1": "meta-llama/llama-3.1-8b-instant",
@@ -220,12 +218,9 @@ def main():
         llm_names = ["Mistral", "Sherlock", "DeepSeek-R1", "Llama-3.1", "Gemma-2"]
         assignments = {}
 
-        # Mistral — সবসময় DARK (সবচেয়ে নির্ভরযোগ্য)
         assignments["Mistral"] = ("DARK", dark_data)
-        # Sherlock — SEARCH
         assignments["Sherlock"] = ("SEARCH", search_data)
 
-        # OpenRouter মডেল — ডায়নামিক
         if cycle_counter % 2 == 1:
             assignments["DeepSeek-R1"] = ("DARK", dark_data)
             assignments["Llama-3.1"] = ("SEARCH", search_data)
